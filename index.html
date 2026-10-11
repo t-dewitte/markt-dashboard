@@ -1,0 +1,891 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Markt-Dashboard Agrar</title>
+<meta name="description" content="Weltmarkt-, EU-Getreide-, Ölsaaten- und Zuckerpreise aus frei verfügbaren Quellen (Weltbank, EU-Kommission, EZB).">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Source+Sans+3:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,500&display=swap" rel="stylesheet">
+<style>
+:root {
+  --font-anthropic-sans: "Source Sans 3", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-anthropic-serif: "Source Serif 4", Georgia, "Times New Roman", serif;
+  --cds-font-size-caption: 0.8125rem; --cds-font-size-body: 0.9375rem; --cds-font-size-heading: 1.0625rem; --cds-font-size-title: 1.75rem;
+  --cds-font-weight-medium: 500;
+  --cds-gap-xs: 0.25rem; --cds-gap-sm: 0.5rem; --cds-gap-md: 0.875rem; --cds-gap-lg: 1.25rem; --cds-gap-xl: 2rem;
+  --cds-pad-xs: 0.25rem; --cds-pad-sm: 0.5rem; --cds-pad-md: 0.75rem; --cds-pad-lg: 1rem;
+  --cds-radius: 8px; --cds-dur-slow: 300ms;
+  --color-bg: #f6f6f3; --color-panel: #ffffff; --color-fg: #1d2420; --color-fg-muted: #5f6762; --color-border-line: #dfe2dc;
+  --color-ok: #2e7d4f; --color-warn: #a86b00; --color-bad: #b3261e;
+  --cds-chart-grid: #e8ebe5; --cds-chart-axis: #c9cdc5; --cds-chart-reference: #9aa19b; --cds-chart-muted: #b9bfb8;
+  --cds-surface-popover: #ffffff; --cds-border: #d6dad3; --cds-shadow-popover: 0 4px 16px rgba(0,0,0,.12); --cds-text-secondary: #5f6762;
+  --skeleton: #e9ece6;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-bg: #151917; --color-panel: #1e2320; --color-fg: #e8ece8; --color-fg-muted: #a3aba5; --color-border-line: #333a35;
+    --color-ok: #6cc28f; --color-warn: #e0a640; --color-bad: #f0857c;
+    --cds-chart-grid: #2a302c; --cds-chart-axis: #454c47; --cds-chart-reference: #7d857f; --cds-chart-muted: #59615b;
+    --cds-surface-popover: #262b28; --cds-border: #3d4540; --cds-shadow-popover: 0 4px 16px rgba(0,0,0,.5); --cds-text-secondary: #a3aba5;
+    --skeleton: #2a302c;
+    color-scheme: dark;
+  }
+}
+html, body { margin: 0; }
+[hidden] { display: none !important; }
+body { background: var(--color-bg); color: var(--color-fg); font-family: var(--font-anthropic-sans); font-size: var(--cds-font-size-body); line-height: 1.45; }
+#dash-root { max-width: 1200px; margin-inline: auto; padding: 1.25rem 16px 3rem; }
+#dash-root .dash-skeleton { color: transparent !important; background: var(--skeleton); border-radius: 4px; }
+#dash-root .md-chart.dash-skeleton { background: var(--skeleton); }
+#dash-root a { color: inherit; }
+.site-foot { max-width: 1200px; margin: 0 auto; padding: 0 16px 2rem; font-size: var(--cds-font-size-caption); color: var(--color-fg-muted); }
+</style>
+<script src="d3.min.js"></script>
+<script>
+// Kleine Datenschicht: ersetzt die Dashboard-Umgebung von Claude.
+window.dash = (() => {
+  const FILES = { pinksheet: 'data/pinksheet_monatlich.csv', eu_getreide: 'data/eu_getreide_woche.csv', eu_oelsaaten: 'data/eu_oelsaaten_woche.csv', eu_zucker: 'data/eu_zucker_monat.csv', ezb: 'data/ezb_eur_usd.csv' };
+  const DEFAULTS = { tab: 'weltmarkt', waehrung: 'eur', g_produkt: 'Brotweizen', g_basis: 'Rouen (FR)', g_vergleich: ['Hamburg (DE)', 'Ø Deutschland'], g_zeitraum: '3j', o_produkt: 'Raps', o_basis: 'Ø Deutschland (ab Silo)', o_vergleich: ['Rouen (FR, frei Verarbeiter)', 'Köln (DE, ab Silo)'], o_zeitraum: '3j', z_vertrag: 'Monatsdaten', z_zeitraum: '10j' };
+  const store = {}; const calcs = {}; const cache = {}; const listeners = [];
+  let params = { ...DEFAULTS };
+  Object.keys(FILES).forEach((id) => { store[id] = { status: 'loading', data: [] }; });
+  const fire = () => listeners.forEach((fn) => { try { fn(); } catch (e) { console.error(e); } });
+  const data = (id) => {
+    if (store[id]) return store[id];
+    const c = calcs[id];
+    if (!c) return { status: 'missing', data: [] };
+    if (cache[id]) return cache[id];
+    const ins = c.inputs.map(data);
+    if (ins.some((d) => d.status === 'error')) return { status: 'error', data: [] };
+    if (ins.some((d) => d.status !== 'ok')) return { status: 'loading', data: [] };
+    try { cache[id] = { status: 'ok', data: c.fn(...ins.map((d) => d.data)) }; } catch (e) { console.error(id, e); cache[id] = { status: 'error', data: [], message: String(e) }; }
+    return cache[id];
+  };
+  const api = {
+    calc: (id, def) => { calcs[id] = def; },
+    loader: () => {},
+    data,
+    onData: (fn) => { listeners.push(fn); try { fn(); } catch (e) { console.error(e); } },
+    params: () => params,
+    setParams: (o) => { params = { ...params, ...o }; fire(); },
+    resetParams: () => { params = { ...DEFAULTS }; fire(); },
+    setLink: (name) => { try { history.replaceState(null, '', '#' + name); } catch (e) {} },
+    refresh: () => {},
+    colors: ['#2f6db5', '#d9822b', '#3a9d6a', '#b8456b', '#7b61c4', '#8f8a2a', '#2a9fb0', '#a0522d'],
+    _start: () => {
+      let t; window.addEventListener('resize', () => { clearTimeout(t); t = setTimeout(fire, 150); });
+      Object.entries(FILES).forEach(([id, url]) => {
+        d3.csv(url).then((rows) => { store[id] = { status: 'ok', data: rows, columns: rows.columns }; Object.keys(cache).forEach((k) => delete cache[k]); fire(); })
+          .catch((e) => { store[id] = { status: 'error', data: [], message: String(e) }; fire(); });
+      });
+    }
+  };
+  return api;
+})();
+</script>
+</head>
+<body>
+<div id="dash-root">
+<style>
+#dash-root .md { display: flex; flex-direction: column; gap: var(--cds-gap-lg); font-family: var(--font-anthropic-sans); }
+#dash-root .md-head { display: flex; flex-wrap: wrap; gap: var(--cds-gap-md); justify-content: space-between; align-items: flex-end; }
+#dash-root .md-head-l { display: flex; flex-direction: column; gap: var(--cds-gap-xs); min-width: 0; }
+#dash-root .md-title { font-family: var(--font-anthropic-serif); font-weight: 400; font-size: var(--cds-font-size-title); margin: 0; }
+#dash-root .md-lead { color: var(--color-fg-muted); font-size: var(--cds-font-size-body); margin: 0; max-width: 70ch; }
+#dash-root .md-tabs { display: flex; gap: var(--cds-gap-xs); border-bottom: 1px solid var(--color-border-line); overflow-x: auto; }
+#dash-root .md-tabs button { font: inherit; font-size: var(--cds-font-size-body); padding: var(--cds-pad-sm) var(--cds-pad-md); border: 0; background: transparent; color: var(--color-fg-muted); cursor: pointer; border-bottom: 2px solid transparent; white-space: nowrap; }
+#dash-root .md-tabs button[aria-selected="true"] { color: var(--color-fg); border-bottom-color: var(--color-fg); font-weight: 500; }
+#dash-root .md-pane { display: flex; flex-direction: column; gap: var(--cds-gap-xl); }
+#dash-root .md-section { display: flex; flex-direction: column; gap: var(--cds-gap-md); }
+#dash-root .md-h2 { font-size: var(--cds-font-size-heading); font-weight: var(--cds-font-weight-medium); margin: 0; }
+#dash-root .md-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 17rem), 1fr)); gap: var(--cds-gap-md); }
+#dash-root .md-grid-wide { grid-template-columns: repeat(auto-fit, minmax(min(100%, 24rem), 1fr)); }
+#dash-root .md-card { background: var(--color-panel); border: 1px solid var(--color-border-line); border-radius: var(--cds-radius); padding: var(--cds-pad-lg); display: flex; flex-direction: column; gap: var(--cds-gap-sm); min-width: 0; }
+#dash-root .md-name { font-size: var(--cds-font-size-body); font-weight: var(--cds-font-weight-medium); margin: 0; }
+#dash-root .md-note { font-size: var(--cds-font-size-caption); color: var(--color-fg-muted); margin: 0; }
+#dash-root .md-value { display: flex; align-items: baseline; gap: var(--cds-gap-xs); flex-wrap: wrap; }
+#dash-root .md-num { font-family: var(--font-anthropic-serif); font-weight: 400; font-size: var(--cds-font-size-title); font-variant-numeric: tabular-nums; min-width: 3ch; }
+#dash-root .md-unit { color: var(--color-fg-muted); font-size: var(--cds-font-size-caption); }
+#dash-root .md-deltas { display: flex; gap: var(--cds-gap-md); font-size: var(--cds-font-size-caption); color: var(--color-fg-muted); font-variant-numeric: tabular-nums; flex-wrap: wrap; }
+#dash-root .md-deltas i { font-style: normal; }
+#dash-root .md-deltas span span { color: var(--color-fg); font-weight: 500; }
+#dash-root .md-chart { position: relative; min-height: 120px; }
+#dash-root .md-chart-lg { min-height: 200px; }
+#dash-root .md-chart-xl { min-height: 300px; }
+#dash-root .md-chart svg { display: block; overflow: visible; }
+#dash-root .md-tip { position: absolute; z-index: 2; background: var(--cds-surface-popover); border: 1px solid var(--cds-border); border-radius: var(--cds-radius); box-shadow: var(--cds-shadow-popover); padding: var(--cds-pad-xs) var(--cds-pad-sm); font-size: var(--cds-font-size-caption); pointer-events: none; white-space: nowrap; font-variant-numeric: tabular-nums; }
+#dash-root .md-tip .d { color: var(--cds-text-secondary); }
+#dash-root .md-fail { display: flex; align-items: center; justify-content: center; gap: var(--cds-gap-xs); min-height: inherit; height: 100%; color: var(--color-fg-muted); font-size: var(--cds-font-size-caption); }
+#dash-root .md-fail::before { content: ""; width: .375rem; height: .375rem; border-radius: 50%; background: var(--color-bad); }
+#dash-root .md-foot { font-size: var(--cds-font-size-caption); color: var(--color-fg-muted); margin: 0; max-width: 80ch; }
+#dash-root .md-top { display: flex; flex-wrap: wrap; gap: var(--cds-gap-lg); justify-content: space-between; align-items: flex-start; }
+#dash-root .md-kpi { display: flex; flex-direction: column; gap: var(--cds-gap-sm); min-width: 0; }
+#dash-root .md-controls { display: flex; flex-direction: column; gap: var(--cds-gap-sm); min-width: 0; max-width: 28rem; }
+#dash-root .md-ctl-row { display: flex; flex-wrap: wrap; gap: var(--cds-gap-sm); align-items: center; }
+#dash-root .md-ctl-label { font-size: var(--cds-font-size-caption); color: var(--color-fg-muted); }
+#dash-root .md-select, #dash-root .md-search { font: inherit; font-size: var(--cds-font-size-body); padding: var(--cds-pad-xs) var(--cds-pad-sm); border: 1px solid var(--color-border-line); border-radius: var(--cds-radius); background: var(--color-bg); color: var(--color-fg); max-width: 100%; }
+#dash-root .md-chips { display: flex; flex-wrap: wrap; gap: var(--cds-gap-xs); }
+#dash-root .md-chip { display: inline-flex; align-items: center; gap: var(--cds-gap-xs); font: inherit; font-size: var(--cds-font-size-caption); padding: 2px var(--cds-pad-sm); border: 1px solid var(--color-border-line); border-radius: 999px; background: var(--color-bg); color: var(--color-fg); cursor: pointer; }
+#dash-root .md-chip i { width: .6rem; height: .6rem; border-radius: 50%; display: inline-block; }
+#dash-root .md-chip.fix { cursor: default; }
+#dash-root .md-seg { display: inline-flex; border: 1px solid var(--color-border-line); border-radius: var(--cds-radius); overflow: hidden; align-self: flex-start; }
+#dash-root .md-seg button { font: inherit; font-size: var(--cds-font-size-caption); padding: var(--cds-pad-xs) var(--cds-pad-sm); border: 0; background: transparent; color: var(--color-fg-muted); cursor: pointer; }
+#dash-root .md-seg button[aria-pressed="true"] { background: var(--color-panel); color: var(--color-fg); font-weight: 500; box-shadow: inset 0 -2px 0 var(--color-fg); }
+#dash-root .md-seg button:disabled { opacity: .4; cursor: not-allowed; }
+#dash-root .md-tablebox { max-height: 22rem; overflow: auto; border-top: 1px solid var(--color-border-line); }
+#dash-root .md-table { width: 100%; border-collapse: collapse; font-size: var(--cds-font-size-caption); font-variant-numeric: tabular-nums; }
+#dash-root .md-table th { position: sticky; top: 0; background: var(--color-panel); text-align: left; font-weight: 500; color: var(--color-fg-muted); padding: var(--cds-pad-xs) var(--cds-pad-sm); border-bottom: 1px solid var(--color-border-line); }
+#dash-root .md-table td { padding: var(--cds-pad-xs) var(--cds-pad-sm); border-bottom: 1px solid var(--color-border-line); white-space: nowrap; }
+#dash-root .md-table .num { text-align: right; }
+#dash-root .md-table tbody tr { cursor: pointer; }
+#dash-root .md-table tbody tr:hover td { background: var(--color-bg); }
+#dash-root .md-table tr.alt td { color: var(--color-fg-muted); }
+#dash-root .md-table tr.sel td:first-child { font-weight: 500; }
+#dash-root .md-table tr.base td { font-weight: 500; }
+@media (max-width: 40rem) { #dash-root .md-table .hide-n { display: none; } }
+#dash-root [data-dash-source-state=empty] { color: transparent; }
+#dash-root [data-dash-source-state=refreshing] { opacity: .5; transition: opacity var(--cds-dur-slow); }
+</style>
+
+<div class="md">
+  <header class="md-head" id="kopf">
+    <div class="md-head-l">
+      <h1 class="md-title">Markt-Dashboard Agrar</h1>
+      <p class="md-lead">Weltmarkt monatlich (Weltbank), EU-Handelsplätze wöchentlich und Zucker monatlich (EU-Kommission). Umrechnung mit dem EZB-Referenzkurs.</p>
+    </div>
+    <div class="md-ctl-row">
+      <span class="md-ctl-label">Währung</span>
+      <div class="md-seg" role="group" aria-label="Währung" id="waehrung" data-source="ezb">
+        <button type="button" data-w="eur">€</button>
+        <button type="button" data-w="usd">US-$</button>
+      </div>
+    </div>
+  </header>
+
+  <nav class="md-tabs" role="tablist" id="tabs">
+    <button type="button" role="tab" data-tab="weltmarkt">Weltmarkt</button>
+    <button type="button" role="tab" data-tab="getreide">Getreide EU</button>
+    <button type="button" role="tab" data-tab="oel">Ölsaaten EU</button>
+    <button type="button" role="tab" data-tab="zucker">Zucker EU</button>
+  </nav>
+
+  <!-- ============ WELTMARKT ============ -->
+  <div class="md-pane" id="weltmarkt" role="tabpanel">
+    <p class="md-lead" id="lead">Stand <b class="dash-skeleton" data-source="kennzahlen" data-field="monat" data-where="reihe=weizen_hrw">—</b>. Monatsdurchschnitte, nominal.</p>
+    <section class="md-section"><h2 class="md-h2">Getreide</h2><div class="md-grid" data-group="Getreide"></div></section>
+    <section class="md-section"><h2 class="md-h2">Dünger</h2><div class="md-grid" data-group="Dünger"></div></section>
+    <section class="md-section"><h2 class="md-h2">Energie</h2><div class="md-grid" data-group="Energie"></div></section>
+    <section class="md-section" id="relationen">
+      <h2 class="md-h2">Preisrelationen</h2>
+      <div class="md-grid md-grid-wide">
+        <div class="md-card" id="karte-hw">
+          <p class="md-name">Harnstoff-Weizen-Verhältnis</p>
+          <p class="md-note">Tonnen Weizen (US HRW), die den Preis einer Tonne Harnstoff decken. Höher heißt: Stickstoff ist relativ teuer. Unabhängig von der Währung.</p>
+          <div class="md-value"><span class="md-num dash-skeleton" id="hw-num" data-source="relationen" data-field="harnstoff_je_weizen">—</span><span class="md-unit">t Weizen je t Harnstoff</span></div>
+          <div class="md-chart md-chart-lg dash-skeleton" id="chart-hw" data-source="relationen"></div>
+        </div>
+        <div class="md-card" id="karte-gas">
+          <p class="md-name">Gaspreisabstand Europa zu USA</p>
+          <p class="md-note">TTF geteilt durch Henry Hub, Großhandelspreise ohne Steuern, Netzentgelte und CO₂-Kosten.</p>
+          <div class="md-value"><span class="md-num dash-skeleton" id="gas-num" data-source="relationen" data-field="ttf_je_henry_hub">—</span><span class="md-unit">fach</span></div>
+          <div class="md-chart md-chart-lg dash-skeleton" id="chart-gas" data-source="relationen"></div>
+        </div>
+      </div>
+    </section>
+    <p class="md-foot">Ø 2023–25: Durchschnitt aller Monate Januar 2023 bis Dezember 2025. Der Zeitraum ist fest eingestellt und wird einmal im Jahr überprüft. Quelle: Weltbank, Commodity Price Data (Pink Sheet), nominal in US-Dollar; Euro-Werte umgerechnet mit dem EZB-Monatsdurchschnitt.</p>
+  </div>
+
+  <!-- ============ GETREIDE / OELSAATEN (gleicher Aufbau) ============ -->
+  <template id="tpl-markt">
+    <div class="md-card" data-part="card">
+      <div class="md-top">
+        <div class="md-kpi">
+          <p class="md-name" data-part="name">—</p>
+          <p class="md-note">Woche bis <span class="dash-skeleton kpi" data-field="woche">—</span> · <span data-part="stufe"></span></p>
+          <div class="md-value"><span class="md-num dash-skeleton kpi" data-field="preis">—</span><span class="md-unit" data-part="unit">€/t</span></div>
+          <div class="md-deltas">
+            <span>ggü. Vorwoche <span class="dash-skeleton kpi" data-field="vw">—</span></span>
+            <span>ggü. Vorjahreswoche <span class="dash-skeleton kpi" data-field="vj">—</span></span>
+            <span>ggü. Ø 2023–25 <span class="dash-skeleton kpi" data-field="ref">—</span></span>
+          </div>
+        </div>
+        <div class="md-controls">
+          <div class="md-ctl-row">
+            <label class="md-ctl-label" data-part="l-produkt">Produkt</label>
+            <select class="md-select" data-part="produkt"></select>
+          </div>
+          <div class="md-ctl-row">
+            <label class="md-ctl-label" data-part="l-basis">Basis</label>
+            <select class="md-select" data-part="basis"></select>
+          </div>
+          <div class="md-ctl-row">
+            <label class="md-ctl-label" data-part="l-add">Vergleich</label>
+            <select class="md-select" data-part="add"></select>
+          </div>
+          <div class="md-chips" data-part="chips"></div>
+          <div class="md-seg" role="group" aria-label="Zeitraum" data-part="zeit">
+            <button type="button" data-z="1j">12 Monate</button>
+            <button type="button" data-z="3j">3 Jahre</button>
+            <button type="button" data-z="alle">seit 2021</button>
+          </div>
+        </div>
+      </div>
+      <div class="md-chart md-chart-xl dash-skeleton" data-part="chart"></div>
+      <p class="md-note" data-part="hinweis"></p>
+    </div>
+    <div class="md-card">
+      <p class="md-name">Letzter Preis je Handelsplatz</p>
+      <p class="md-note">Klick auf eine Zeile nimmt den Platz in den Vergleich auf. Notierungen, die älter als vier Wochen sind, erscheinen grau.</p>
+      <input class="md-search" type="search" placeholder="Platz oder Land suchen" aria-label="Handelsplatz suchen" data-part="suche">
+      <div class="md-tablebox">
+        <table class="md-table" data-part="tabelle" data-row-key="schluessel">
+          <thead><tr>
+            <th data-field="markt">Handelsplatz</th>
+            <th data-field="land">Land</th>
+            <th data-field="stufe" class="hide-n">Stufe</th>
+            <th data-field="woche" class="hide-n">Woche bis</th>
+            <th data-field="preis_eur" class="num" data-part="th-preis">€/t</th>
+            <th class="num">ggü. Basis</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+  </template>
+
+  <div class="md-pane" id="getreide" role="tabpanel" hidden>
+    <section class="md-section" id="getreide-box"></section>
+    <p class="md-foot">Wochenpreise der EU-Mitgliedstaaten nach Handelsplatz und Lieferstufe, Quelle: EU-Kommission, Agri-food Data Portal. Plätze mit weniger als 100 Notierungen seit 2021 oder ohne Notierung in 2026 sind ausgelassen, offensichtliche Fehlwerte (0 oder Sprünge über 35 % zur Nachbarwoche) entfernt. US-Dollar-Werte umgerechnet mit dem EZB-Wochendurchschnitt.</p>
+  </div>
+
+  <div class="md-pane" id="oel" role="tabpanel" hidden>
+    <section class="md-section" id="oel-box"></section>
+    <p class="md-foot">Wochenpreise für Raps, Rapsschrot und Rapsöl nach Handelsplatz, Quelle: EU-Kommission, Agri-food Data Portal. Plätze mit weniger als 40 Notierungen seit 2021 oder ohne Notierung in 2026 sind ausgelassen, offensichtliche Fehlwerte entfernt. Bei Rapsschrot steht der Proteingehalt in eckigen Klammern, wo die Meldung ihn angibt.</p>
+  </div>
+
+  <!-- ============ ZUCKER ============ -->
+  <div class="md-pane" id="zucker" role="tabpanel" hidden>
+    <section class="md-section">
+      <div class="md-card" id="karte-zucker">
+        <div class="md-top">
+          <div class="md-kpi">
+            <p class="md-name">Weißzucker, EU-Durchschnitt</p>
+            <p class="md-note">Monat <span class="dash-skeleton zkpi" data-field="monat">—</span> · <span id="z-vertrag-txt"></span></p>
+            <div class="md-value"><span class="md-num dash-skeleton zkpi" data-field="preis">—</span><span class="md-unit" id="z-unit">€/t</span></div>
+            <div class="md-deltas">
+              <span>ggü. <i id="z-lbl-vm">Vormonat</i> <span class="dash-skeleton zkpi" data-field="vm">—</span></span>
+              <span>ggü. <i id="z-lbl-vj">Vorjahresmonat</i> <span class="dash-skeleton zkpi" data-field="vj">—</span></span>
+              <span>ggü. Ø 2023–25 <span class="dash-skeleton zkpi" data-field="ref">—</span></span>
+            </div>
+          </div>
+          <div class="md-controls">
+            <div class="md-seg" role="group" aria-label="Vertragsart" id="z-vertrag">
+              <button type="button" data-v="Monatsdaten">Monatsdaten</button>
+              <button type="button" data-v="Kurzfristkontrakte">Kurzfristkontrakte</button>
+            </div>
+            <div class="md-seg" role="group" aria-label="Zeitraum" id="z-zeit">
+              <button type="button" data-z="3j">3 Jahre</button>
+              <button type="button" data-z="10j">10 Jahre</button>
+              <button type="button" data-z="alle">seit 2006</button>
+            </div>
+            <div class="md-chips" id="z-legende"></div>
+          </div>
+        </div>
+        <div class="md-chart md-chart-xl dash-skeleton" id="chart-zucker" data-source="eu_zucker"></div>
+        <p class="md-note">Durchschnittlicher Verkaufspreis von Weißzucker ab Werk aus den Meldungen der EU-Zuckerhersteller, gewichtet mit der Menge. Region 1 bis 3 sind die Preisregionen der EU-Kommission. Die Daten erscheinen mit etwa drei Monaten Verzug.</p>
+      </div>
+    </section>
+    <p class="md-foot">Quelle: EU-Kommission, Agri-food Data Portal, Zuckerpreise. US-Dollar-Werte umgerechnet mit dem EZB-Monatsdurchschnitt.</p>
+  </div>
+</div>
+
+<script>
+window.MD = (() => {
+  const fix = (s) => s.replace(/−/g, '-');
+  const num = (v, d) => fix(new Intl.NumberFormat('de-DE', { minimumFractionDigits: d, maximumFractionDigits: d }).format(v));
+  const dec = (v) => (Math.abs(v) >= 100 ? 0 : Math.abs(v) >= 10 ? 1 : 2);
+  const pct = (v) => (v == null || !Number.isFinite(v) ? '—' : (v > 0 ? '+' : '') + num(v, 1) + ' %');
+  const MON = ['Jan', 'Feb', 'Mär', 'Apr', 'Mai', 'Jun', 'Jul', 'Aug', 'Sep', 'Okt', 'Nov', 'Dez'];
+  const monat = (s) => { const d = new Date(String(s).slice(0, 10)); return MON[d.getUTCMonth()] + ' ' + d.getUTCFullYear(); };
+  const datum = (s) => { const [y, m, d] = String(s).slice(0, 10).split('-'); return `${d}.${m}.${y}`; };
+  const enc = (v) => String(v).replace(/%/g, '%25').replace(/&/g, '%26').replace(/=/g, '%3D');
+  const cur = () => (dash.params().waehrung === 'usd' && dash.data('ezb').status === 'ok' ? 'usd' : 'eur');
+  const sym = () => (cur() === 'usd' ? '$' : '€');
+  const SERIES = [
+    { k: 'weizen_hrw', n: 'Weizen (US HRW)', u: '/t', g: 'Getreide', note: 'Hard Red Winter, fob US-Golf' },
+    { k: 'mais', n: 'Mais (US)', u: '/t', g: 'Getreide', note: 'US No. 2 Yellow, fob US-Golf' },
+    { k: 'harnstoff', n: 'Harnstoff', u: '/t', g: 'Dünger', note: 'Granuliert, fob Naher Osten' },
+    { k: 'dap', n: 'DAP', u: '/t', g: 'Dünger', note: 'Diammonphosphat, fob US-Golf' },
+    { k: 'kali', n: 'Kaliumchlorid', u: '/t', g: 'Dünger', note: 'Granuliert, cfr Brasilien' },
+    { k: 'gas_ttf', n: 'Erdgas Europa (TTF)', u: '/MMBtu', g: 'Energie', note: 'Title Transfer Facility, Niederlande' },
+    { k: 'gas_henry_hub', n: 'Erdgas USA (Henry Hub)', u: '/MMBtu', g: 'Energie', note: 'Spot Henry Hub, Louisiana' },
+    { k: 'brent', n: 'Rohöl Brent', u: '/bbl', g: 'Energie', note: 'Nordsee, Referenz für Europa' }
+  ];
+  const fail = (el) => { el.classList.remove('dash-skeleton'); el.replaceChildren(); const d = document.createElement('div'); d.className = 'md-fail'; d.textContent = 'Failed to load'; el.appendChild(d); };
+  const visible = (el) => !el.closest('[hidden]');
+
+  // Linienchart mit Hover-Linie, Datum an der Achse und Tooltip.
+  // series: [{name, color, width, pts:[{date, v, label}]}]
+  function chart(el, series, o) {
+    el.classList.remove('dash-skeleton');
+    el.replaceChildren();
+    series = series.filter((s) => s.pts.length);
+    if (!series.length) return;
+    const W = Math.max(260, el.clientWidth), H = o.h;
+    const all = series.flatMap((s) => s.pts);
+    const y = d3.scaleLinear(d3.extent(all, (d) => d.v), [H - 24, 10]).nice(o.h > 150 ? 5 : 3);
+    const svg = d3.select(el).append('svg').attr('width', '100%').attr('viewBox', `0 0 ${W} ${H}`).attr('height', H);
+    const ticks = y.ticks(o.h > 150 ? 5 : 3);
+    let ml = 0;
+    const probe = svg.append('g').attr('font-size', 'var(--cds-font-size-caption)');
+    ticks.forEach((t) => { ml = Math.max(ml, probe.append('text').text(o.fmt(t)).node().getComputedTextLength()); });
+    probe.remove();
+    ml += 8;
+    const x0 = o.start || d3.min(all, (d) => d.date), x1 = d3.max(all, (d) => d.date);
+    const x = d3.scaleUtc([x0, x1], [ml, W - 10]);
+    svg.append('g').selectAll('line').data(ticks).join('line').attr('x1', ml).attr('x2', W - 10).attr('y1', (t) => y(t)).attr('y2', (t) => y(t)).attr('stroke', 'var(--cds-chart-grid)');
+    svg.append('g').selectAll('text').data(ticks).join('text').attr('x', ml - 6).attr('y', (t) => y(t)).attr('dy', '0.32em').attr('text-anchor', 'end').attr('fill', 'var(--color-fg-muted)').attr('font-size', 'var(--cds-font-size-caption)').text((t) => o.fmt(t));
+    const span = (x1 - x0) / 864e5;
+    const xt = span > 800 ? d3.utcYear.range(d3.utcYear.ceil(x0), x1) : x.ticks(Math.max(2, Math.floor((W - ml) / 90)));
+    const step = Math.ceil(xt.length / Math.max(1, Math.floor((W - ml) / 60)));
+    const xf = (d) => (span > 800 ? String(d.getUTCFullYear()) : (d.getUTCMonth() === 0 ? String(d.getUTCFullYear()) : ['Jan', 'Feb', 'Mär', 'Apr', 'Mai', 'Jun', 'Jul', 'Aug', 'Sep', 'Okt', 'Nov', 'Dez'][d.getUTCMonth()]));
+    svg.append('g').selectAll('text').data(xt.filter((d, i) => i % step === 0)).join('text').attr('x', (d) => x(d)).attr('y', H - 4).attr('text-anchor', 'middle').attr('fill', 'var(--color-fg-muted)').attr('font-size', 'var(--cds-font-size-caption)').text(xf);
+    if (o.area && series.length === 1) {
+      const gid = 'g' + Math.random().toString(36).slice(2);
+      const grad = svg.append('defs').append('linearGradient').attr('id', gid).attr('x1', 0).attr('x2', 0).attr('y1', 0).attr('y2', 1);
+      [[0, .26], [.25, .16], [.5, .08], [.75, .03], [1, 0]].forEach(([of, a]) => grad.append('stop').attr('offset', of).attr('style', `stop-color:${series[0].color};stop-opacity:${a}`));
+      svg.append('path').datum(series[0].pts).attr('fill', `url(#${gid})`).attr('d', d3.area().x((d) => x(d.date)).y0(H - 24).y1((d) => y(d.v)));
+    }
+    const gap = (o.gapDays || 21) * 864e5;
+    const ln = d3.line().defined((d) => d.v != null).x((d) => x(d.date)).y((d) => y(d.v));
+    series.slice().reverse().forEach((s) => {
+      const withGaps = [];
+      s.pts.forEach((p, i) => { if (i && p.date - s.pts[i - 1].date > gap) withGaps.push({ date: p.date, v: null }); withGaps.push(p); });
+      svg.append('path').datum(withGaps).attr('fill', 'none').attr('stroke', s.color).attr('stroke-width', s.width || 2).attr('stroke-linecap', 'round').attr('stroke-linejoin', 'round').attr('d', ln);
+      const l = s.pts[s.pts.length - 1];
+      svg.append('circle').attr('cx', x(l.date)).attr('cy', y(l.v)).attr('r', 3).attr('fill', s.color);
+    });
+    const rule = svg.append('line').attr('y1', 6).attr('y2', H - 24).attr('stroke', 'var(--cds-chart-reference)').style('display', 'none');
+    const xLab = svg.append('g').style('display', 'none');
+    const xLabBg = xLab.append('rect').attr('y', H - 19).attr('height', 18).attr('rx', 4).attr('fill', 'var(--color-panel)').attr('stroke', 'var(--color-border-line)');
+    const xLabT = xLab.append('text').attr('y', H - 6).attr('text-anchor', 'middle').attr('fill', 'var(--color-fg)').attr('font-size', 'var(--cds-font-size-caption)');
+    const dots = svg.append('g');
+    const tip = d3.select(el).append('div').attr('class', 'md-tip').style('display', 'none');
+    const bis = d3.bisector((d) => d.date).center;
+    svg.append('rect').attr('x', ml).attr('y', 0).attr('width', W - 10 - ml).attr('height', H).attr('fill', 'transparent')
+      .on('pointermove', (ev) => {
+        const [mx] = d3.pointer(ev);
+        const t = x.invert(mx);
+        const s0 = series[0];
+        const ref = s0.pts[bis(s0.pts, t)];
+        rule.style('display', null).attr('x1', x(ref.date)).attr('x2', x(ref.date));
+        xLab.style('display', null);
+        xLabT.text(ref.label).attr('x', 0);
+        const lw = xLabT.node().getComputedTextLength() + 12;
+        const lx = Math.min(Math.max(x(ref.date), ml + lw / 2), W - 10 - lw / 2);
+        xLabT.attr('x', lx); xLabBg.attr('x', lx - lw / 2).attr('width', lw);
+        dots.selectAll('*').remove();
+        tip.style('display', null).replaceChildren();
+        tip.append('div').attr('class', 'd').text(ref.label);
+        series.forEach((s) => {
+          const p = s.pts[bis(s.pts, ref.date)];
+          if (!p || Math.abs(p.date - ref.date) > (o.matchDays || 4) * 864e5) return;
+          dots.append('circle').attr('cx', x(p.date)).attr('cy', y(p.v)).attr('r', 3.5).attr('fill', s.color).attr('stroke', 'var(--color-panel)').attr('stroke-width', 1.5);
+          const row = tip.append('div');
+          if (series.length > 1) row.append('span').style('display', 'inline-block').style('width', '.55rem').style('height', '.55rem').style('border-radius', '50%').style('margin-right', '.35rem').style('background', s.color);
+          row.append('span').text((series.length > 1 ? s.name + ': ' : '') + o.fmt(p.v, true) + (o.unit ? ' ' + o.unit : ''));
+        });
+        const tw = tip.node().offsetWidth;
+        const px = (x(ref.date) / W) * el.clientWidth;
+        tip.style('left', (px + 12 + tw > el.clientWidth ? Math.max(0, px - 12 - tw) : px + 12) + 'px').style('top', '0px');
+      })
+      .on('pointerleave', () => { rule.style('display', 'none'); xLab.style('display', 'none'); dots.selectAll('*').remove(); tip.style('display', 'none'); });
+  }
+  return { num, dec, pct, monat, datum, enc, cur, sym, SERIES, fail, visible, chart };
+})();
+</script>
+
+<script>
+// ---------- Wechselkurse ----------
+dash.calc('kurs_monat', {
+  title: 'EZB-Kurs, Monatsdurchschnitt',
+  description: 'Durchschnitt der täglichen EZB-Referenzkurse je Monat: 1 Euro = x US-Dollar.',
+  inputs: ['ezb'],
+  fn: (ezb) => {
+    const m = new Map();
+    ezb.forEach((r) => { const v = Number(r.OBS_VALUE); if (!Number.isFinite(v) || !r.TIME_PERIOD) return; const k = String(r.TIME_PERIOD).slice(0, 7) + '-01'; const a = m.get(k) || [0, 0]; a[0] += v; a[1] += 1; m.set(k, a); });
+    return [...m.entries()].sort().map(([monat, [s, n]]) => ({ monat, usd_je_eur: Math.round((s / n) * 10000) / 10000 }));
+  }
+});
+dash.calc('kurs_woche', {
+  title: 'EZB-Kurs, Wochendurchschnitt',
+  description: 'Durchschnitt der täglichen EZB-Referenzkurse von Montag bis Sonntag, datiert auf den Sonntag (Wochenende der EU-Preismeldungen).',
+  inputs: ['ezb'],
+  fn: (ezb) => {
+    const m = new Map();
+    ezb.forEach((r) => {
+      const v = Number(r.OBS_VALUE); if (!Number.isFinite(v) || !r.TIME_PERIOD) return;
+      const d = new Date(String(r.TIME_PERIOD).slice(0, 10));
+      const so = new Date(d.getTime() + ((7 - d.getUTCDay()) % 7) * 864e5).toISOString().slice(0, 10);
+      const a = m.get(so) || [0, 0]; a[0] += v; a[1] += 1; m.set(so, a);
+    });
+    return [...m.entries()].sort().map(([woche, [s, n]]) => ({ woche, usd_je_eur: Math.round((s / n) * 10000) / 10000 }));
+  }
+});
+
+// ---------- Weltmarkt ----------
+dash.calc('kennzahlen', {
+  title: 'Weltmarkt: aktueller Monat und Veränderung',
+  description: 'Letzter Monatswert je Reihe in US-Dollar und Euro (geteilt durch den EZB-Monatskurs) und Veränderung zum Vormonat, Vorjahresmonat und Durchschnitt 2023 bis 2025.',
+  inputs: ['pinksheet', 'kurs_monat'],
+  fn: (pinksheet, kurs_monat) => {
+    const keys = ['weizen_hrw', 'mais', 'harnstoff', 'dap', 'kali', 'gas_ttf', 'gas_henry_hub', 'brent'];
+    const kurs = new Map(kurs_monat.map((r) => [r.monat, r.usd_je_eur]));
+    const lastK = kurs_monat[kurs_monat.length - 1].usd_je_eur;
+    const rows = pinksheet.slice().sort((a, b) => (a.monat < b.monat ? -1 : 1));
+    const eur = (r, k) => Number(r[k]) / (kurs.get(String(r.monat).slice(0, 10)) || lastK);
+    const n = rows.length, last = rows[n - 1], prev = rows[n - 2], yago = rows[n - 13];
+    const ref = rows.filter((r) => r.monat >= '2023-01-01' && r.monat <= '2025-12-01');
+    const pct = (a, b) => Math.round((a / b - 1) * 1000) / 10;
+    const r2 = (v) => Math.round(v * 100) / 100;
+    return keys.map((k) => {
+      const avgU = ref.reduce((s, r) => s + Number(r[k]), 0) / ref.length;
+      const avgE = ref.reduce((s, r) => s + eur(r, k), 0) / ref.length;
+      return {
+        reihe: k, monat: last.monat, vm_monat: prev.monat, vj_monat: yago.monat,
+        wert_usd: Number(last[k]), wert_eur: r2(eur(last, k)),
+        vm_usd: pct(Number(last[k]), Number(prev[k])), vm_eur: pct(eur(last, k), eur(prev, k)),
+        vj_usd: pct(Number(last[k]), Number(yago[k])), vj_eur: pct(eur(last, k), eur(yago, k)),
+        ref_usd: pct(Number(last[k]), avgU), ref_eur: pct(eur(last, k), avgE)
+      };
+    });
+  }
+});
+dash.calc('relationen', {
+  title: 'Preisrelationen je Monat',
+  description: 'Harnstoffpreis geteilt durch Weizenpreis (US HRW) und Gaspreis TTF geteilt durch Henry Hub.',
+  inputs: ['pinksheet'],
+  fn: (pinksheet) => pinksheet.map((r) => ({
+    monat: r.monat,
+    harnstoff_je_weizen: Math.round((Number(r.harnstoff) / Number(r.weizen_hrw)) * 100) / 100,
+    ttf_je_henry_hub: Math.round((Number(r.gas_ttf) / Number(r.gas_henry_hub)) * 10) / 10
+  }))
+});
+
+// ---------- EU-Wochenpreise: Kennzahlen und letzter Preis je Platz ----------
+dash.calc('getreide_kpi', {
+  title: 'Getreide EU: Kennzahlen je Platz',
+  description: 'Je Produkt und Platz: letzte Wochennotierung in € und US-$ (mal EZB-Wochenkurs), Veränderung zur Vorwoche, zur Vorjahreswoche (±3 Wochen) und zum Durchschnitt 2023 bis 2025 (mind. 10 Notierungen).',
+  inputs: ['eu_getreide', 'kurs_woche'],
+  fn: (eu_getreide, kurs_woche) => {
+    const kw = kurs_woche.map((r) => [r.woche, r.usd_je_eur]);
+    const rate = (w) => { let lo = 0, hi = kw.length - 1, best = kw[0][1]; while (lo <= hi) { const m = (lo + hi) >> 1; if (kw[m][0] <= w) { best = kw[m][1]; lo = m + 1; } else hi = m - 1; } return best; };
+    const t = (s) => new Date(s).getTime();
+    const pct = (a, b) => Math.round((a / b - 1) * 1000) / 10;
+    const by = new Map();
+    eu_getreide.forEach((r) => { const k = r.produkt + '|' + r.markt; const a = by.get(k) || []; a.push({ woche: String(r.woche).slice(0, 10), eur: Number(r.preis) }); by.set(k, a); });
+    return [...by.entries()].map(([schluessel, v]) => {
+      v.sort((a, b) => (a.woche < b.woche ? -1 : 1));
+      v.forEach((p) => { p.usd = p.eur * rate(p.woche); });
+      const last = v[v.length - 1], prev = v[v.length - 2];
+      const ziel = t(last.woche) - 364 * 864e5;
+      const vj = v.reduce((b, r) => (Math.abs(t(r.woche) - ziel) < Math.abs(t(b.woche) - ziel) ? r : b), v[0]);
+      const vjOk = Math.abs(t(vj.woche) - ziel) <= 21 * 864e5;
+      const ref = v.filter((r) => r.woche >= '2023-01-01' && r.woche <= '2025-12-31');
+      const avg = (c) => (ref.length >= 10 ? ref.reduce((s, r) => s + r[c], 0) / ref.length : null);
+      const [produkt, markt] = schluessel.split('|');
+      const o = { schluessel, produkt, markt, woche: last.woche };
+      ['eur', 'usd'].forEach((c) => {
+        o['preis_' + c] = Math.round(last[c] * 100) / 100;
+        o['vw_' + c] = prev ? pct(last[c], prev[c]) : null;
+        o['vj_' + c] = vjOk ? pct(last[c], vj[c]) : null;
+        o['ref_' + c] = avg(c) ? pct(last[c], avg(c)) : null;
+      });
+      return o;
+    });
+  }
+});
+dash.calc('getreide_aktuell', {
+  title: 'Getreide EU: letzter Preis je Platz',
+  description: 'Jüngste Wochennotierung je Produkt und Handelsplatz in € und US-$ (mal EZB-Wochenkurs).',
+  inputs: ['eu_getreide', 'kurs_woche'],
+  fn: (eu_getreide, kurs_woche) => {
+    const kurs = new Map(kurs_woche.map((r) => [r.woche, r.usd_je_eur]));
+    const lastK = kurs_woche[kurs_woche.length - 1].usd_je_eur;
+    const last = new Map();
+    eu_getreide.forEach((r) => { const k = r.produkt + '|' + r.markt; const w = String(r.woche).slice(0, 10); const o = last.get(k); if (!o || w > o.woche) last.set(k, { schluessel: k, produkt: r.produkt, markt: r.markt, land: r.land, stufe: r.stufe, woche: w, preis_eur: Number(r.preis) }); });
+    return [...last.values()].map((r) => ({ ...r, preis_usd: Math.round(r.preis_eur * (kurs.get(r.woche) || lastK) * 100) / 100 })).sort((a, b) => b.preis_eur - a.preis_eur);
+  }
+});
+dash.calc('oel_kpi', {
+  title: 'Ölsaaten EU: Kennzahlen je Platz',
+  description: 'Je Produkt und Platz: letzte Wochennotierung in € und US-$ (mal EZB-Wochenkurs), Veränderung zur Vorwoche, zur Vorjahreswoche (±3 Wochen) und zum Durchschnitt 2023 bis 2025 (mind. 10 Notierungen).',
+  inputs: ['eu_oelsaaten', 'kurs_woche'],
+  fn: (eu_oelsaaten, kurs_woche) => {
+    const kw = kurs_woche.map((r) => [r.woche, r.usd_je_eur]);
+    const rate = (w) => { let lo = 0, hi = kw.length - 1, best = kw[0][1]; while (lo <= hi) { const m = (lo + hi) >> 1; if (kw[m][0] <= w) { best = kw[m][1]; lo = m + 1; } else hi = m - 1; } return best; };
+    const t = (s) => new Date(s).getTime();
+    const pct = (a, b) => Math.round((a / b - 1) * 1000) / 10;
+    const by = new Map();
+    eu_oelsaaten.forEach((r) => { const k = r.produkt + '|' + r.markt; const a = by.get(k) || []; a.push({ woche: String(r.woche).slice(0, 10), eur: Number(r.preis) }); by.set(k, a); });
+    return [...by.entries()].map(([schluessel, v]) => {
+      v.sort((a, b) => (a.woche < b.woche ? -1 : 1));
+      v.forEach((p) => { p.usd = p.eur * rate(p.woche); });
+      const last = v[v.length - 1], prev = v[v.length - 2];
+      const ziel = t(last.woche) - 364 * 864e5;
+      const vj = v.reduce((b, r) => (Math.abs(t(r.woche) - ziel) < Math.abs(t(b.woche) - ziel) ? r : b), v[0]);
+      const vjOk = Math.abs(t(vj.woche) - ziel) <= 21 * 864e5;
+      const ref = v.filter((r) => r.woche >= '2023-01-01' && r.woche <= '2025-12-31');
+      const avg = (c) => (ref.length >= 10 ? ref.reduce((s, r) => s + r[c], 0) / ref.length : null);
+      const [produkt, markt] = schluessel.split('|');
+      const o = { schluessel, produkt, markt, woche: last.woche };
+      ['eur', 'usd'].forEach((c) => {
+        o['preis_' + c] = Math.round(last[c] * 100) / 100;
+        o['vw_' + c] = prev ? pct(last[c], prev[c]) : null;
+        o['vj_' + c] = vjOk ? pct(last[c], vj[c]) : null;
+        o['ref_' + c] = avg(c) ? pct(last[c], avg(c)) : null;
+      });
+      return o;
+    });
+  }
+});
+dash.calc('oel_aktuell', {
+  title: 'Ölsaaten EU: letzter Preis je Platz',
+  description: 'Jüngste Wochennotierung je Produkt und Handelsplatz in € und US-$ (mal EZB-Wochenkurs).',
+  inputs: ['eu_oelsaaten', 'kurs_woche'],
+  fn: (eu_oelsaaten, kurs_woche) => {
+    const kurs = new Map(kurs_woche.map((r) => [r.woche, r.usd_je_eur]));
+    const lastK = kurs_woche[kurs_woche.length - 1].usd_je_eur;
+    const last = new Map();
+    eu_oelsaaten.forEach((r) => { const k = r.produkt + '|' + r.markt; const w = String(r.woche).slice(0, 10); const o = last.get(k); if (!o || w > o.woche) last.set(k, { schluessel: k, produkt: r.produkt, markt: r.markt, land: r.land, stufe: r.stufe, woche: w, preis_eur: Number(r.preis) }); });
+    return [...last.values()].map((r) => ({ ...r, preis_usd: Math.round(r.preis_eur * (kurs.get(r.woche) || lastK) * 100) / 100 })).sort((a, b) => b.preis_eur - a.preis_eur);
+  }
+});
+
+// ---------- Zucker ----------
+dash.calc('zucker_kpi', {
+  title: 'Zucker EU: Kennzahlen',
+  description: 'Je Region und Vertragsart: letzter Monatspreis in € und US-$ (mal EZB-Monatskurs), Veränderung zum Vormonat, Vorjahresmonat und Durchschnitt 2023 bis 2025.',
+  inputs: ['eu_zucker', 'kurs_monat'],
+  fn: (eu_zucker, kurs_monat) => {
+    const kurs = new Map(kurs_monat.map((r) => [r.monat, r.usd_je_eur]));
+    const lastK = kurs_monat[kurs_monat.length - 1].usd_je_eur;
+    const pct = (a, b) => Math.round((a / b - 1) * 1000) / 10;
+    const by = new Map();
+    eu_zucker.forEach((r) => { const k = r.region + '|' + r.vertrag; const a = by.get(k) || []; const m = String(r.monat).slice(0, 10); a.push({ monat: m, eur: Number(r.preis), usd: Number(r.preis) * (kurs.get(m) || lastK) }); by.set(k, a); });
+    return [...by.entries()].map(([schluessel, v]) => {
+      v.sort((a, b) => (a.monat < b.monat ? -1 : 1));
+      const last = v[v.length - 1], prev = v[v.length - 2];
+      const [y, mo] = last.monat.split('-');
+      const vjm = `${Number(y) - 1}-${mo}-01`;
+      const vj = v.find((r) => r.monat === vjm);
+      const ref = v.filter((r) => r.monat >= '2023-01-01' && r.monat <= '2025-12-01');
+      const [region, vertrag] = schluessel.split('|');
+      const o = { schluessel, region, vertrag, monat: last.monat, vm_monat: prev ? prev.monat : null, vj_monat: vj ? vj.monat : null };
+      ['eur', 'usd'].forEach((c) => {
+        const avg = ref.length >= 6 ? ref.reduce((s, r) => s + r[c], 0) / ref.length : null;
+        o['preis_' + c] = Math.round(last[c] * 100) / 100;
+        o['vm_' + c] = prev ? pct(last[c], prev[c]) : null;
+        o['vj_' + c] = vj ? pct(last[c], vj[c]) : null;
+        o['ref_' + c] = avg ? pct(last[c], avg) : null;
+      });
+      return o;
+    });
+  }
+});
+</script>
+
+<script>
+// ================= Rahmen: Tabs und Währung =================
+(() => {
+  const tabs = document.getElementById('tabs');
+  const wSeg = document.getElementById('waehrung');
+  const panes = ['weltmarkt', 'getreide', 'oel', 'zucker'];
+  const tab = () => (panes.includes(dash.params().tab) ? dash.params().tab : 'weltmarkt');
+  tabs.addEventListener('click', (e) => { const b = e.target.closest('button[data-tab]'); if (b) { dash.setParams({ tab: b.dataset.tab }); dash.setLink(b.dataset.tab); } });
+  wSeg.addEventListener('click', (e) => { const b = e.target.closest('button[data-w]'); if (b && !b.disabled) dash.setParams({ waehrung: b.dataset.w }); });
+  const named = location.hash.slice(1);
+  if (panes.includes(named)) dash.setParams({ tab: named });
+  dash.onData(() => {
+    const t = tab();
+    tabs.querySelectorAll('button').forEach((b) => b.setAttribute('aria-selected', String(b.dataset.tab === t)));
+    panes.forEach((p) => { document.getElementById(p).hidden = p !== t; });
+    const fxOk = dash.data('ezb').status === 'ok';
+    const c = window.MD.cur();
+    wSeg.querySelectorAll('button').forEach((b) => { b.setAttribute('aria-pressed', String(b.dataset.w === c)); if (b.dataset.w === 'usd') b.disabled = !fxOk; });
+  });
+})();
+</script>
+
+<script>
+// ================= Weltmarkt =================
+(() => {
+  const { SERIES, num, dec, pct, monat, cur, sym, fail, visible, chart } = window.MD;
+  SERIES.forEach((s) => {
+    const grid = document.querySelector(`#dash-root .md-grid[data-group="${s.g}"]`);
+    const card = document.createElement('div');
+    card.className = 'md-card';
+    card.id = 'karte-' + s.k;
+    const w = `reihe=${s.k}`;
+    card.innerHTML = `
+      <p class="md-name"></p>
+      <p class="md-note"></p>
+      <div class="md-value"><span class="md-num dash-skeleton wm" data-source="kennzahlen" data-base="wert" data-where="${w}">—</span><span class="md-unit"></span></div>
+      <div class="md-deltas">
+        <span>ggü. <i class="lbl-vm">Vormonat</i> <span class="dash-skeleton wm" data-source="kennzahlen" data-base="vm" data-where="${w}">—</span></span>
+        <span>ggü. <i class="lbl-vj">Vorjahresmonat</i> <span class="dash-skeleton wm" data-source="kennzahlen" data-base="vj" data-where="${w}">—</span></span>
+        <span>ggü. Ø 2023–25 <span class="dash-skeleton wm" data-source="kennzahlen" data-base="ref" data-where="${w}">—</span></span>
+      </div>
+      <div class="md-chart dash-skeleton" id="chart-${s.k}" data-source="pinksheet kurs_monat"></div>`;
+    card.querySelector('.md-name').textContent = s.n;
+    card.querySelector('.md-note').textContent = s.note;
+    grid.appendChild(card);
+  });
+
+  dash.onData(() => {
+    const pane = document.getElementById('weltmarkt');
+    if (!visible(pane)) return;
+    const ps = dash.data('pinksheet'), kz = dash.data('kennzahlen'), rel = dash.data('relationen'), km = dash.data('kurs_monat');
+    const c = cur();
+    pane.querySelectorAll('.wm').forEach((el) => { el.dataset.field = el.dataset.base + '_' + c; });
+    SERIES.forEach((s) => { document.querySelector(`#karte-${s.k} .md-unit`).textContent = sym() + s.u; });
+    if (kz.status === 'ok') {
+      const by = new Map(kz.data.map((r) => [r.reihe, r]));
+      pane.querySelectorAll('.wm').forEach((el) => {
+        const r = by.get(el.dataset.where.split('=')[1]); if (!r) return;
+        el.classList.remove('dash-skeleton');
+        const v = r[el.dataset.field];
+        el.textContent = el.dataset.base === 'wert' ? num(v, dec(v)) : pct(v);
+      });
+      const r0 = kz.data[0];
+      pane.querySelectorAll('.lbl-vm').forEach((el) => { el.textContent = monat(r0.vm_monat); });
+      pane.querySelectorAll('.lbl-vj').forEach((el) => { el.textContent = monat(r0.vj_monat); });
+      const lead = pane.querySelector('[data-field="monat"]');
+      lead.classList.remove('dash-skeleton'); lead.textContent = monat(r0.monat);
+    } else if (kz.status !== 'loading') {
+      pane.querySelectorAll('[data-source="kennzahlen"]').forEach((el) => { el.classList.remove('dash-skeleton'); el.textContent = '—'; });
+    }
+    const kurs = new Map(km.status === 'ok' ? km.data.map((r) => [r.monat, r.usd_je_eur]) : []);
+    const lastK = km.status === 'ok' && km.data.length ? km.data[km.data.length - 1].usd_je_eur : null;
+    SERIES.forEach((s) => {
+      const el = document.getElementById('chart-' + s.k);
+      if (ps.status === 'ok' && (c === 'usd' || km.status === 'ok')) {
+        const pts = ps.data.map((r) => {
+          const m = String(r.monat).slice(0, 10);
+          const u = r[s.k] === '' ? NaN : Number(r[s.k]);
+          const v = c === 'usd' ? u : u / (kurs.get(m) || lastK);
+          return { date: new Date(m), v, label: monat(m) };
+        }).filter((p) => Number.isFinite(p.v));
+        chart(el, [{ name: s.n, color: dash.colors[0], pts }], { h: 120, area: true, fmt: (v) => num(v, dec(v)), unit: sym() + s.u, gapDays: 45, matchDays: 20 });
+      } else if (ps.status !== 'loading' && km.status !== 'loading') fail(el);
+    });
+    const hw = document.getElementById('chart-hw'), gs = document.getElementById('chart-gas');
+    if (rel.status === 'ok') {
+      const rows = rel.data.map((r) => ({ ...r, m: String(r.monat).slice(0, 10) }));
+      const last = rel.data[rel.data.length - 1];
+      const hn = document.getElementById('hw-num'), gn = document.getElementById('gas-num');
+      hn.dataset.where = 'monat=' + last.monat; hn.classList.remove('dash-skeleton'); hn.textContent = num(last.harnstoff_je_weizen, 2);
+      gn.dataset.where = 'monat=' + last.monat; gn.classList.remove('dash-skeleton'); gn.textContent = num(last.ttf_je_henry_hub, 1);
+      chart(hw, [{ name: 'Harnstoff/Weizen', color: dash.colors[1], pts: rows.map((r) => ({ date: new Date(r.m), v: r.harnstoff_je_weizen, label: monat(r.m) })) }], { h: 200, area: true, fmt: (v) => num(v, 2), unit: 't Weizen je t Harnstoff', gapDays: 45, matchDays: 20 });
+      chart(gs, [{ name: 'TTF/Henry Hub', color: dash.colors[2], pts: rows.map((r) => ({ date: new Date(r.m), v: r.ttf_je_henry_hub, label: monat(r.m) })) }], { h: 200, area: true, fmt: (v) => num(v, 1), unit: 'fach', gapDays: 45, matchDays: 20 });
+    } else if (rel.status !== 'loading') { fail(hw); fail(gs); }
+  });
+})();
+</script>
+
+<script>
+// ================= EU-Wochenmärkte (Getreide, Ölsaaten) =================
+(() => {
+  const { num, pct, datum, enc, cur, sym, fail, visible, chart } = window.MD;
+  function makeMarket(cfg) {
+    const box = document.getElementById(cfg.box);
+    box.appendChild(document.getElementById('tpl-markt').content.cloneNode(true));
+    const q = (p) => box.querySelector(`[data-part="${p}"]`);
+    const ids = ['produkt', 'basis', 'add', 'suche'];
+    ids.forEach((p) => { q(p).id = cfg.px + '-' + p; });
+    q('l-produkt').setAttribute('for', cfg.px + '-produkt'); q('l-basis').setAttribute('for', cfg.px + '-basis'); q('l-add').setAttribute('for', cfg.px + '-add');
+    q('card').id = cfg.px + '-karte';
+    q('chart').id = cfg.px + '-chart';
+    q('chart').setAttribute('data-source', cfg.ds + ' kurs_woche');
+    q('tabelle').id = cfg.px + '-tabelle';
+    q('tabelle').setAttribute('data-source', cfg.aktuell);
+    q('hinweis').textContent = cfg.hinweis;
+    box.querySelectorAll('.kpi').forEach((el) => { el.setAttribute('data-source', cfg.kpi); el.dataset.base = el.dataset.field; });
+    const P = (k) => dash.params()[cfg.px + '_' + k];
+    const set = (o) => { const x = {}; Object.entries(o).forEach(([k, v]) => { x[cfg.px + '_' + k] = v; }); dash.setParams(x); };
+    const produkt = () => P('produkt') || cfg.def.produkt;
+    const vergleich = () => (Array.isArray(P('vergleich')) ? P('vergleich') : cfg.def.vergleich);
+    const zeitraum = () => P('zeitraum') || '3j';
+    let maerkte = [];
+    const basis = () => { const b = P('basis') || cfg.def.basis; if (maerkte.includes(b)) return b; return cfg.fallback.find((m) => maerkte.includes(m)) || maerkte[0] || b; };
+    const colorOf = (m, list) => (m === basis() ? dash.colors[0] : dash.colors[(list.indexOf(m) % 7) + 1]);
+    const add = (m) => { if (!m || m === basis()) return; const v = vergleich(); if (!v.includes(m) && v.length < 6) set({ vergleich: [...v, m] }); };
+
+    q('produkt').addEventListener('change', () => set({ produkt: q('produkt').value }));
+    q('basis').addEventListener('change', () => { const b = q('basis').value; if (b) set({ basis: b, vergleich: vergleich().filter((x) => x !== b) }); });
+    q('add').addEventListener('change', () => { add(q('add').value); q('add').value = ''; });
+    q('chips').addEventListener('click', (e) => { const b = e.target.closest('button[data-m]'); if (b) set({ vergleich: vergleich().filter((x) => x !== b.dataset.m) }); });
+    q('zeit').addEventListener('click', (e) => { const b = e.target.closest('button[data-z]'); if (b) set({ zeitraum: b.dataset.z }); });
+    q('tabelle').querySelector('tbody').addEventListener('click', (e) => { const tr = e.target.closest('tr[data-key]'); if (tr) add(tr.dataset.key.split('|')[1]); });
+    q('suche').addEventListener('input', () => drawTable());
+
+    let akt = [];
+    function drawTable() {
+      const tb = q('tabelle').querySelector('tbody');
+      tb.replaceChildren();
+      const c = cur(), B = basis(), v = vergleich();
+      const rows = akt.filter((r) => r.produkt === produkt());
+      const sq = q('suche').value.trim().toLowerCase();
+      const neu = rows.reduce((m, r) => (r.woche > m ? r.woche : m), '');
+      const grenze = neu ? new Date(new Date(neu).getTime() - 28 * 864e5).toISOString().slice(0, 10) : '';
+      const bRow = rows.find((r) => r.markt === B);
+      const bp = bRow ? bRow['preis_' + c] : null;
+      rows.filter((r) => !sq || (r.markt + ' ' + r.land).toLowerCase().includes(sq)).forEach((r) => {
+        const tr = document.createElement('tr');
+        tr.dataset.key = r.schluessel;
+        if (r.woche < grenze) tr.classList.add('alt');
+        if (v.includes(r.markt)) tr.classList.add('sel');
+        if (r.markt === B) tr.classList.add('base');
+        const p = r['preis_' + c];
+        const d = r.markt === B || bp == null ? '' : ((p - bp) > 0 ? '+' : '') + num(Math.round((p - bp) * 100) / 100, 2);
+        [[r.markt], [r.land], [r.stufe, 'hide-n'], [datum(r.woche), 'hide-n'], [num(p, 2), 'num'], [d, 'num']].forEach(([t, cl]) => { const td = document.createElement('td'); td.textContent = t; if (cl) td.className = cl; tr.appendChild(td); });
+        tb.appendChild(tr);
+      });
+    }
+
+    dash.onData(() => {
+      const pane = document.getElementById(cfg.pane);
+      if (!visible(pane)) return;
+      const d = dash.data(cfg.ds), kpi = dash.data(cfg.kpi), ak = dash.data(cfg.aktuell), kw = dash.data('kurs_woche');
+      const c = cur();
+      if (ak.status === 'ok') akt = ak.data;
+      const prods = [...new Set(akt.map((r) => r.produkt))];
+      maerkte = akt.filter((r) => r.produkt === produkt()).map((r) => r.markt);
+      const B = basis(), v = vergleich().filter((m) => m !== B && maerkte.includes(m));
+      const fill = (el, first, list, dis) => {
+        el.replaceChildren(new Option(first, ''));
+        const g = d3.group(list, (r) => r.land);
+        [...g.keys()].sort((a, b) => a.localeCompare(b, 'de')).forEach((land) => {
+          const og = document.createElement('optgroup'); og.label = land;
+          g.get(land).slice().sort((a, b) => a.markt.localeCompare(b.markt, 'de')).forEach((r) => { const o = new Option(r.markt, r.markt); o.disabled = dis(r.markt); og.appendChild(o); });
+          el.appendChild(og);
+        });
+      };
+      if (ak.status === 'ok') {
+        q('produkt').replaceChildren(...prods.map((p) => new Option(p, p)));
+        q('produkt').value = produkt();
+        const list = akt.filter((r) => r.produkt === produkt());
+        fill(q('basis'), 'Basis wählen …', list, () => false); q('basis').value = B;
+        fill(q('add'), 'Platz hinzufügen …', list.filter((r) => r.markt !== B), (m) => v.includes(m)); q('add').value = '';
+        const bRow = list.find((r) => r.markt === B);
+        q('stufe').textContent = bRow ? bRow.stufe : '';
+        drawTable();
+      }
+      q('name').textContent = produkt() + ': ' + B;
+      q('unit').textContent = sym() + '/t';
+      q('th-preis').textContent = sym() + '/t';
+      q('th-preis').setAttribute('data-field', 'preis_' + c);
+      q('zeit').querySelectorAll('button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.z === zeitraum())));
+      const chips = q('chips'); chips.replaceChildren();
+      const fx = document.createElement('span'); fx.className = 'md-chip fix'; const fi = document.createElement('i'); fi.style.background = dash.colors[0]; fx.append(fi, B); chips.appendChild(fx);
+      v.forEach((m) => { const b = document.createElement('button'); b.type = 'button'; b.className = 'md-chip'; b.dataset.m = m; b.title = 'Aus dem Vergleich entfernen'; const i = document.createElement('i'); i.style.background = colorOf(m, v); b.append(i, m + ' ×'); chips.appendChild(b); });
+
+      const kpiEls = box.querySelectorAll('.kpi');
+      kpiEls.forEach((el) => { el.dataset.where = 'schluessel=' + enc(produkt() + '|' + B); el.dataset.field = el.dataset.base === 'woche' ? 'woche' : el.dataset.base + '_' + c; });
+      if (kpi.status === 'ok') {
+        const r = kpi.data.find((x) => x.schluessel === produkt() + '|' + B);
+        kpiEls.forEach((el) => {
+          el.classList.remove('dash-skeleton');
+          if (!r) { el.textContent = '—'; return; }
+          const f = el.dataset.field;
+          el.textContent = el.dataset.base === 'preis' ? num(r[f], 2) : el.dataset.base === 'woche' ? datum(r.woche) : pct(r[f]);
+        });
+      } else if (kpi.status !== 'loading') kpiEls.forEach((el) => { el.classList.remove('dash-skeleton'); el.textContent = '—'; });
+
+      const el = q('chart');
+      if (d.status === 'ok' && kw.status === 'ok') {
+        const kurs = new Map(kw.data.map((r) => [r.woche, r.usd_je_eur]));
+        const lastK = kw.data[kw.data.length - 1].usd_je_eur;
+        const names = [B, ...v];
+        const rows = d.data.filter((r) => r.produkt === produkt() && names.includes(r.markt));
+        const maxD = d3.max(rows, (r) => new Date(String(r.woche).slice(0, 10)));
+        const z = zeitraum();
+        const start = !maxD ? null : z === 'alle' ? new Date('2021-01-01') : d3.utcMonth.offset(maxD, z === '1j' ? -12 : -36);
+        const series = names.map((m) => ({
+          name: m, color: colorOf(m, v), width: m === B ? 2.5 : 1.75,
+          pts: rows.filter((r) => r.markt === m).map((r) => { const w = String(r.woche).slice(0, 10); const e = Number(r.preis); return { date: new Date(w), v: c === 'usd' ? e * (kurs.get(w) || lastK) : e, label: 'Woche bis ' + datum(w) }; }).filter((p) => !start || p.date >= start).sort((a, b) => a.date - b.date)
+        }));
+        chart(el, series, { h: 300, start, fmt: (x, full) => num(x, full ? 2 : 0), unit: sym() + '/t' });
+      } else if (d.status !== 'loading' && kw.status !== 'loading') fail(el);
+    });
+  }
+
+  makeMarket({ px: 'g', box: 'getreide-box', pane: 'getreide', ds: 'eu_getreide', kpi: 'getreide_kpi', aktuell: 'getreide_aktuell',
+    def: { produkt: 'Brotweizen', basis: 'Rouen (FR)', vergleich: ['Hamburg (DE)', 'Ø Deutschland'] },
+    fallback: ['Rouen (FR)', 'Hamburg (DE)', 'Ø Deutschland', 'Köln (DE)', 'Würzburg (DE)', 'EU-Durchschnitt'],
+    hinweis: 'Die Lieferstufe unterscheidet sich je Platz (ab Silo, frei Hafen, ab Hof); Abstände zwischen Plätzen sind deshalb nur bedingt Frachtkosten. Lücken: Wochen ohne Notierung.' });
+  makeMarket({ px: 'o', box: 'oel-box', pane: 'oel', ds: 'eu_oelsaaten', kpi: 'oel_kpi', aktuell: 'oel_aktuell',
+    def: { produkt: 'Raps', basis: 'Ø Deutschland (ab Silo)', vergleich: ['Rouen (FR, frei Verarbeiter)', 'Köln (DE, ab Silo)'] },
+    fallback: ['Ø Deutschland (ab Silo)', 'Ø Deutschland', 'Hamburg (DE)', 'Mannheim (DE, ab Silo)', 'Köln (DE)', 'Ø Polen'],
+    hinweis: 'Die Lieferstufe unterscheidet sich je Platz (ab Silo, frei Verarbeiter, fob). Lücken: Wochen ohne Notierung.' });
+})();
+</script>
+
+<script>
+// ================= Zucker =================
+(() => {
+  const { num, pct, monat, enc, cur, sym, fail, visible, chart } = window.MD;
+  const REG = ['EU-Durchschnitt', 'Region 1', 'Region 2', 'Region 3'];
+  const vertrag = () => dash.params().z_vertrag || 'Monatsdaten';
+  const zeitraum = () => dash.params().z_zeitraum || '10j';
+  document.getElementById('z-vertrag').addEventListener('click', (e) => { const b = e.target.closest('button[data-v]'); if (b) dash.setParams({ z_vertrag: b.dataset.v }); });
+  document.getElementById('z-zeit').addEventListener('click', (e) => { const b = e.target.closest('button[data-z]'); if (b) dash.setParams({ z_zeitraum: b.dataset.z }); });
+  const kpiEls = document.querySelectorAll('#karte-zucker .zkpi');
+  kpiEls.forEach((el) => { el.setAttribute('data-source', 'zucker_kpi'); el.dataset.base = el.dataset.field; });
+  dash.onData(() => {
+    const pane = document.getElementById('zucker');
+    if (!visible(pane)) return;
+    const z = dash.data('eu_zucker'), k = dash.data('zucker_kpi'), km = dash.data('kurs_monat');
+    const c = cur(), vt = vertrag();
+    document.querySelectorAll('#z-vertrag button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.v === vt)));
+    document.querySelectorAll('#z-zeit button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.z === zeitraum())));
+    document.getElementById('z-vertrag-txt').textContent = vt;
+    document.getElementById('z-unit').textContent = sym() + '/t';
+    const leg = document.getElementById('z-legende'); leg.replaceChildren();
+    REG.forEach((r, i) => { const s = document.createElement('span'); s.className = 'md-chip fix'; const d = document.createElement('i'); d.style.background = dash.colors[i]; s.append(d, r); leg.appendChild(s); });
+    kpiEls.forEach((el) => { el.dataset.where = 'schluessel=' + enc('EU-Durchschnitt|' + vt); el.dataset.field = ['monat'].includes(el.dataset.base) ? 'monat' : el.dataset.base + '_' + c; });
+    if (k.status === 'ok') {
+      const r = k.data.find((x) => x.schluessel === 'EU-Durchschnitt|' + vt);
+      kpiEls.forEach((el) => {
+        el.classList.remove('dash-skeleton');
+        if (!r) { el.textContent = '—'; return; }
+        el.textContent = el.dataset.base === 'preis' ? num(r[el.dataset.field], 2) : el.dataset.base === 'monat' ? monat(r.monat) : pct(r[el.dataset.field]);
+      });
+      if (r) { document.getElementById('z-lbl-vm').textContent = r.vm_monat ? monat(r.vm_monat) : 'Vormonat'; document.getElementById('z-lbl-vj').textContent = r.vj_monat ? monat(r.vj_monat) : 'Vorjahresmonat'; }
+    } else if (k.status !== 'loading') kpiEls.forEach((el) => { el.classList.remove('dash-skeleton'); el.textContent = '—'; });
+    const el = document.getElementById('chart-zucker');
+    if (z.status === 'ok' && km.status === 'ok') {
+      const kurs = new Map(km.data.map((r) => [r.monat, r.usd_je_eur]));
+      const lastK = km.data[km.data.length - 1].usd_je_eur;
+      const maxD = d3.max(z.data, (r) => new Date(String(r.monat).slice(0, 10)));
+      const zr = zeitraum();
+      const start = zr === 'alle' ? null : d3.utcYear.offset(maxD, zr === '3j' ? -3 : -10);
+      const series = REG.map((reg, i) => ({
+        name: reg, color: dash.colors[i], width: i === 0 ? 2.5 : 1.75,
+        pts: z.data.filter((r) => r.region === reg && r.vertrag === vt).map((r) => { const m = String(r.monat).slice(0, 10); const e = Number(r.preis); return { date: new Date(m), v: c === 'usd' ? e * (kurs.get(m) || lastK) : e, label: monat(m) }; }).filter((p) => !start || p.date >= start).sort((a, b) => a.date - b.date)
+      }));
+      chart(el, series, { h: 300, start, fmt: (x, full) => num(x, full ? 2 : 0), unit: sym() + '/t', gapDays: 75, matchDays: 20 });
+    } else if (z.status !== 'loading' && km.status !== 'loading') fail(el);
+  });
+})();
+</script>
+</div>
+<footer class="site-foot">
+  <p>Quellen und Nutzung: Weltbank, Commodity Price Data (Pink Sheet), Lizenz CC BY 4.0. Agri-food Data Portal © Europäische Union, Weiterverwendung mit Quellenangabe. Wechselkurse: Europäische Zentralbank. Eigene Aufbereitung und Umrechnung; keine Gewähr. Private, nicht kommerzielle Seite von Thomas de Witte.</p>
+</footer>
+<script>dash._start();</script>
+</body>
+</html>
