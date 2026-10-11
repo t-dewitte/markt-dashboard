@@ -884,8 +884,29 @@ dash.calc('zucker_kpi', {
 </script>
 </div>
 <footer class="site-foot">
+  <p id="datenstand">Datenstand wird geladen …</p>
   <p>Quellen und Nutzung: Weltbank, Commodity Price Data (Pink Sheet), Lizenz CC BY 4.0. Agri-food Data Portal © Europäische Union, Weiterverwendung mit Quellenangabe. Wechselkurse: Europäische Zentralbank. Eigene Aufbereitung und Umrechnung; keine Gewähr. Private, nicht kommerzielle Seite von Thomas de Witte.</p>
 </footer>
+<script>
+(() => {
+  const el = document.getElementById('datenstand');
+  const kopf = document.querySelector('#kopf .md-lead');
+  const zeile = document.createElement('p');
+  zeile.className = 'md-lead';
+  zeile.id = 'datenstand-kopf';
+  if (kopf) kopf.after(zeile);
+  const MON = ['Jan', 'Feb', 'Mär', 'Apr', 'Mai', 'Jun', 'Jul', 'Aug', 'Sep', 'Okt', 'Nov', 'Dez'];
+  const max = (rows, f) => rows.reduce((m, r) => (String(r[f]) > m ? String(r[f]) : m), '');
+  const tag = (s) => { const [y, m, d] = s.slice(0, 10).split('-'); return `${d}.${m}.${y}`; };
+  const mon = (s) => MON[Number(s.slice(5, 7)) - 1] + ' ' + s.slice(0, 4);
+  dash.onData(() => {
+    const ps = dash.data('pinksheet'), g = dash.data('eu_getreide'), z = dash.data('eu_zucker'), k = dash.data('ezb');
+    if ([ps, g, z, k].some((d) => d.status !== 'ok')) return;
+    const t = `Datenstand: Weltmarkt bis ${mon(max(ps.data, 'monat'))} · EU-Getreide und Ölsaaten bis Woche ${tag(max(g.data, 'woche'))} · Zucker bis ${mon(max(z.data, 'monat'))} · EZB-Kurs bis ${tag(max(k.data, 'TIME_PERIOD'))}`;
+    el.textContent = t; zeile.textContent = t;
+  });
+})();
+</script>
 <script>dash._start();</script>
 </body>
 </html>
